@@ -59,6 +59,14 @@ impl<Source: Read> Iterator for BufferedParser<Source> {
     }
 }
 
+impl<Source> Drop for BufferedParser<Source> {
+    fn drop(&mut self) {
+        // Making sure that all instances of Entry have been dropped.
+        let rc = mem::replace(&mut self.borrow_counter, Rc::new(()));
+        Rc::try_unwrap(rc).unwrap();
+    }
+}
+
 impl Deref for Entry {
     type Target = [u8];
 
