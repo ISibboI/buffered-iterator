@@ -1,38 +1,66 @@
-use std::fmt::{Debug, Formatter};
+use core::fmt::{Debug, Formatter};
+use core::ops::Deref;
 use std::io::{ErrorKind, Read};
-use std::ops::Deref;
 use std::rc::Rc;
-use std::{mem, slice};
-
-pub struct BufferedParser<Source> {
-    buffer: Vec<u8>,
-    source: Source,
-    borrow_counter: Rc<()>,
-}
 
 #[derive(Clone)]
 pub struct Entry {
-    offset: *const u8,
-    len: usize,
+    buffer: Rc<Vec<u8>>,
+    length: usize,
+}
 
-    // I hope the compiler does not optimise this away...
-    #[allow(dead_code)]
-    borrow_counter: Rc<()>,
+impl Deref for Entry {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.buffer[..self.length]
+    }
+}
+
+impl Debug for Entry {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.deref().fmt(f)
+    }
+}
+
+#[derive(Debug)]
+pub struct BufferedParser<Source> {
+    buffer: Rc<Vec<u8>>,
+    source: Source,
+}
+
+impl<Source> BufferedParser<Source> {
+    pub fn new(source: Source) -> Self {
+        Self {
+            buffer: Default::default(),
+            source,
+        }
+    }
+}
+
+impl<Source: Clone> Clone for BufferedParser<Source> {
+    fn clone(&self) -> Self {
+        BufferedParser::new(self.source.clone())
+    }
 }
 
 impl<Source: Read> Iterator for BufferedParser<Source> {
     type Item = Entry;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Making sure that all instances of Entry have been dropped.
-        let rc = mem::replace(&mut self.borrow_counter, Rc::new(()));
-        Rc::try_unwrap(rc).unwrap();
-
-        #[allow(clippy::len_zero)]
-        if self.buffer.len() < 1 {
-            self.buffer.resize(1, 0);
+        // If there are still undropped entries, we need a new buffer.
+        // Otherwise, we would update the buffer under the entries feet, making them invalid.
+        if Rc::strong_count(&self.buffer) > 1 {
+            self.buffer = Default::default();
         }
-        match &self.source.read_exact(&mut self.buffer[0..1]) {
+        let buffer = Rc::get_mut(&mut self.buffer).unwrap();
+
+        // Parsing code...
+        if buffer.is_empty() {
+            buffer.resize(1, 0);
+        }
+
+        match &self.source.read_exact(&mut buffer[0..1]) {
             Ok(_) => {}
             err @ Err(error) => {
                 if error.kind() == ErrorKind::UnexpectedEof {
@@ -42,52 +70,17 @@ impl<Source: Read> Iterator for BufferedParser<Source> {
                 }
             }
         };
-        let length = u8::from_be_bytes(self.buffer[0..1].try_into().unwrap()) as usize;
+        let length = u8::from_be_bytes(buffer[0..1].try_into().unwrap()) as usize;
 
-        if self.buffer.len() < length {
-            self.buffer.resize(length, 0);
+        if buffer.len() < length {
+            buffer.resize(length, 0);
         }
-        self.source.read_exact(&mut self.buffer[0..length]).unwrap();
+        self.source.read_exact(&mut buffer[0..length]).unwrap();
 
-        let slice = &self.buffer[0..length];
-        let range = slice.as_ptr_range();
+        // Give the entry a pointer to the buffer, and the length of the current entry.
         Some(Entry {
-            offset: range.start,
-            len: slice.len(),
-            borrow_counter: self.borrow_counter.clone(),
+            buffer: self.buffer.clone(),
+            length,
         })
-    }
-}
-
-impl<Source> Drop for BufferedParser<Source> {
-    fn drop(&mut self) {
-        // Making sure that all instances of Entry have been dropped.
-        let rc = mem::replace(&mut self.borrow_counter, Rc::new(()));
-        Rc::try_unwrap(rc).unwrap();
-    }
-}
-
-impl Deref for Entry {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { slice::from_raw_parts(self.offset, self.len) }
-    }
-}
-
-impl Debug for Entry {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let slice: &[u8] = self.deref();
-        slice.fmt(f)
-    }
-}
-
-impl<Source> BufferedParser<Source> {
-    pub fn new(source: Source) -> Self {
-        Self {
-            buffer: Default::default(),
-            source,
-            borrow_counter: Default::default(),
-        }
     }
 }
